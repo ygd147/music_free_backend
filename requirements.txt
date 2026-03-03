@@ -1,0 +1,11 @@
+fastapi>=0.104.1
+uvicorn>=0.24.0
+pydantic>=2.4.2
+python-multipart>=0.0.6
+pyyaml>=6.0.1
+# 数据持久化依赖
+sqlalchemy>=2.0.23
+python-dotenv>=1.0.0
+cryptography>=41.0.7
+# MySQL新增依赖
+pymysql>=1.1.0          # MySQL驱动
