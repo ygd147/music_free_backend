@@ -1,14 +1,19 @@
 """FastAPI HTTP服务核心实现"""
 import uvicorn
 import json
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException,APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from typing import Optional, Any
 
+from core.plugin_manager import plugin_manager
+from core.local_music_manager import local_music_manager, LocalDirectory
+from pydantic import BaseModel, Field
+
 # 导入核心模块
 from core.constants import logger, app_config, HTTP_SERVER_HOST, HTTP_SERVER_DEFAULT_PORT
 from core.command_handler import cmd_handler
+
 
 # ========== FastAPI实例初始化 ==========
 app = FastAPI(
@@ -16,7 +21,6 @@ app = FastAPI(
     description="MusicFree前后端分离Python后端接口",
     version="0.0.1"
 )
-
 # ========== 增强跨域配置 ==========
 # 生产环境建议替换为具体的前端域名列表，如 ["http://127.0.0.1:8080", "http://localhost:8080"]
 ALLOWED_ORIGINS = ["*"]
@@ -155,6 +159,66 @@ async def health_check():
             "version": "0.0.1"
         })
     })
+
+router = APIRouter(prefix="/plugins", tags=["插件管理"])
+
+#插件
+@router.get("/list")
+async def list_plugins():
+    """获取插件列表"""
+    return {"code": 0, "data": plugin_manager.get_plugins_info()}
+
+@router.post("/search")
+async def search_music(keyword: str, source: str = None, page: int = 1, limit: int = 20):
+    """搜索歌曲"""
+    results = plugin_manager.search(keyword, source, page, limit)
+    return {"code": 0, "data": results}
+
+@router.get("/play-url")
+async def get_play_url(music_id: str, source: str):
+    """获取播放URL"""
+    url = plugin_manager.get_play_url(music_id, source)
+    return {"code": 0, "data": {"url": url}}
+
+
+# ========== 新增：本地音乐管理路由 ==========
+local_router = APIRouter(prefix="/local", tags=["本地音乐管理"])
+
+class AddDirRequest(BaseModel):
+    path: str = Field(..., description="本地目录的绝对路径")
+    name: Optional[str] = Field(None, description="目录别名 (可选)")
+
+@local_router.get("/dirs", summary="获取所有已添加的目录")
+async def get_local_dirs():
+    dirs = local_music_manager.get_all_dirs()
+    return {"code": 0, "data": [{"id": d.id, "name": d.name, "path": d.path} for d in dirs]}
+
+@local_router.post("/dirs", summary="添加一个本地目录")
+async def add_local_dir(req: AddDirRequest):
+    try:
+        new_dir = local_music_manager.add_dir(req.path, req.name)
+        return {"code": 0, "data": {"id": new_dir.id, "msg": "添加成功"}}
+    except ValueError as e:
+        return {"code": 1, "msg": str(e)}
+
+@local_router.delete("/dirs/{dir_id}", summary="删除一个本地目录")
+async def delete_local_dir(dir_id: str):
+    success = local_music_manager.delete_dir(dir_id)
+    if success:
+        return {"code": 0, "msg": "删除成功"}
+    return {"code": 1, "msg": "目录ID不存在"}
+
+@local_router.get("/scan/{dir_id}", summary="扫描目录并返回音乐列表")
+async def scan_directory(dir_id: str):
+    try:
+        playlist = local_music_manager.scan_music(dir_id)
+        return {"code": 0, "data": playlist}
+    except ValueError as e:
+        return {"code": 1, "msg": str(e)}
+
+
+app.include_router(router)
+app.include_router(local_router)
 
 # ========== 服务启动逻辑 ==========
 def start_server_with_retry(initial_port: int = HTTP_SERVER_DEFAULT_PORT):

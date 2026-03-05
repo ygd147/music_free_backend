@@ -12,6 +12,8 @@ from core.storage.mysql_storage import DB_MusicSheet, sheet_music
 from core.storage.models import generate_id, MusicModel
 # 【关键修复2】导入 text 用于执行原生 SQL
 from sqlalchemy import delete, text
+from core.plugin_manager import plugin_manager, SearchResult
+from core.player import audio_player, PlaybackEvent
 
 # ========== 线程安全配置 ==========
 _STORAGE_LOCK = threading.RLock()
@@ -96,6 +98,64 @@ class MessageBus:
         
         logger.info("MessageBus 初始化完成 (纯 MySQL 模式)")
 
+    def _init_player_integration(self):
+        """初始化播放器集成"""
+        # 注册播放器事件到MessageBus
+        audio_player.register_event_callback(PlaybackEvent.EVENT_PROGRESS, self._on_player_progress)
+        audio_player.register_event_callback(PlaybackEvent.EVENT_END, self._on_player_end)
+        
+        # 注册播放器相关命令
+        self._commands.update({
+            "PlayerPlay": self._player_play,
+            "PlayerPause": self._player_pause,
+            "PlayerResume": self._player_resume,
+            "PlayerStop": self._player_stop,
+            "PlayerNext": self._player_next,
+            "PlayerPrev": self._player_prev,
+            "PlayerSetVolume": self._player_set_volume,
+            "PlayerSeek": self._player_seek,
+            "PlayerSetMode": self._player_set_mode
+        })
+    
+    def _player_play(self, source: str = None):
+        """播放音频"""
+        success = audio_player.play(source)
+        if success and source:
+            # 更新应用状态
+            self.app_state.current_music = MusicItem.from_dict({"id": hash(source), "name": source})
+            self.app_state.player_state = "playing"
+        return success
+    def _init_plugin_commands(self):
+        """注册插件相关命令"""
+        self._commands.update({
+            "SearchMusicByPlugin": self._search_music_by_plugin,
+            "GetPlayUrl": self._get_play_url,
+            "GetLyric": self._get_lyric,
+            "GetPluginsInfo": self._get_plugins_info
+        })
+
+    def _search_music_by_plugin(self, keyword: str, source: str = None):
+        """通过插件搜索歌曲并保存到MySQL"""
+        results = plugin_manager.search(keyword, source)
+        
+        # 将搜索结果保存到MySQL
+        music_ids = []
+        for result in results:
+            music_data = {
+                "id": result.id,
+                "name": result.name,
+                "artist": result.artist,
+                "album": result.album,
+                "duration": result.duration,
+                "cover": result.cover,
+                "source": result.source,
+                "url": result.url,
+                "lyric": result.lyric
+            }
+            music_id = self.mysql_storage.save_music(music_data)
+            music_ids.append(music_id)
+        
+        return music_ids
     def _init_mysql_storage(self) -> MySQLStorage:
         """强制初始化 MySQL 存储"""
         try:

@@ -1,0 +1,18 @@
+# 音频播放器配置
+PLAYER:
+  # FFmpeg路径配置（自动查找则留空）
+  ffmpeg_path: ""
+  ffprobe_path: ""
+  
+  # 缓存配置
+  cache_dir: "./cache/audio"
+  max_cache_size: 1024  # MB
+  
+  # Pygame配置
+  sample_rate: 44100
+  bitsize: -16
+  channels: 2
+  buffer_size: 4096
+  
+  # 进度更新间隔（秒）
+  progress_update_interval: 0.5
