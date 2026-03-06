@@ -1,5 +1,6 @@
 """基于Pygame + FFmpeg的音频播放器实现"""
 import time
+import os
 import threading
 import pygame
 from typing import Optional, Dict, Any
@@ -39,12 +40,16 @@ class PygameAudioPlayer(BaseAudioPlayer):
     def play(self, source: str, start_position: float = 0.0) -> bool:
         """
         播放音频
-        :param source: 音频源（本地文件/URL）
+        :param source: 音频源（音频文件路径或URL）
         :param start_position: 起始位置（秒）
         :return: 是否成功
         """
         # 停止当前播放
         self.stop()
+
+        if not os.path.exists(source):
+            logger.error(f"播放失败：文件不存在 {source}")
+            raise FileNotFoundError(f"文件不存在：{source}")
         
         try:
             # 1. 更新状态为缓冲中

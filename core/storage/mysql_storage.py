@@ -222,6 +222,11 @@ class MySQLStorage(BaseStorage):
     def save_music(self, music: Dict[str, Any]) -> str:
         """保存歌曲"""
         session = self._get_session()
+        now = datetime.now()
+        if "create_time" not in music or not music["create_time"]:
+            music["create_time"] = now
+        if "update_time" not in music or not music["update_time"]:
+            music["update_time"] = now
         try:
             # 验证数据
             music_model = dict_to_model(music, MusicModel)

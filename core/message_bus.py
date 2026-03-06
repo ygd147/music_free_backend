@@ -92,39 +92,172 @@ class MessageBus:
         
         # 4. 加载数据
         self._load_from_mysql()
-        
+
+        self._bind_player_events()
+
         # 5. 启动缓存刷新
         self._start_cache_refresh()
         
         logger.info("MessageBus 初始化完成 (纯 MySQL 模式)")
 
-    def _init_player_integration(self):
-        """初始化播放器集成"""
-        # 注册播放器事件到MessageBus
-        audio_player.register_event_callback(PlaybackEvent.EVENT_PROGRESS, self._on_player_progress)
-        audio_player.register_event_callback(PlaybackEvent.EVENT_END, self._on_player_end)
-        
-        # 注册播放器相关命令
-        self._commands.update({
-            "PlayerPlay": self._player_play,
-            "PlayerPause": self._player_pause,
-            "PlayerResume": self._player_resume,
-            "PlayerStop": self._player_stop,
-            "PlayerNext": self._player_next,
-            "PlayerPrev": self._player_prev,
-            "PlayerSetVolume": self._player_set_volume,
-            "PlayerSeek": self._player_seek,
-            "PlayerSetMode": self._player_set_mode
-        })
-    
-    def _player_play(self, source: str = None):
-        """播放音频"""
-        success = audio_player.play(source)
-        if success and source:
-            # 更新应用状态
-            self.app_state.current_music = MusicItem.from_dict({"id": hash(source), "name": source})
-            self.app_state.player_state = "playing"
+
+    def _bind_player_events(self):
+        """绑定播放器事件到MessageBus，自动同步状态到MySQL"""
+        # 播放状态变更事件
+        def on_play(event: PlaybackEvent):
+            """播放开始：更新状态+保存播放历史"""
+            with _STORAGE_LOCK:
+                # 1. 更新应用状态
+                self.app_state.player_state = "playing"
+                source = event.data.get("source")
+                if source:
+                    # 从MySQL查找歌曲信息
+                    music_data = self.mysql_storage.get_music_by_url(source) or {
+                        "id": generate_id("m"),
+                        "name": source.split("/")[-1],
+                        "artist": "未知",
+                        "url": source
+                    }
+                    self.app_state.current_music = MusicItem.from_dict(music_data)
+                    # 2. 保存播放历史到MySQL
+                    self._save_play_history(self.app_state.current_music.id)
+                logger.info(f"[事件] 开始播放：{source}")
+
+        def on_pause(event: PlaybackEvent):
+            """暂停播放：更新状态"""
+            with _STORAGE_LOCK:
+                self.app_state.player_state = "paused"
+                self.app_state.current_position = event.data.get("position", 0)
+                logger.info(f"[事件] 暂停播放（位置：{self.app_state.current_position}秒）")
+
+        def on_resume(event: PlaybackEvent):
+            """恢复播放：更新状态"""
+            with _STORAGE_LOCK:
+                self.app_state.player_state = "playing"
+                logger.info(f"[事件] 恢复播放（位置：{event.data.get('position')}秒）")
+
+        def on_stop(event: PlaybackEvent):
+            """停止播放：更新状态"""
+            with _STORAGE_LOCK:
+                self.app_state.player_state = "stopped"
+                self.app_state.current_position = 0
+                logger.info(f"[事件] 停止播放：{event.data.get('source')}")
+
+        def on_end(event: PlaybackEvent):
+            """播放结束：自动下一曲+更新状态"""
+            with _STORAGE_LOCK:
+                self.app_state.current_position = 0
+                logger.info(f"[事件] 播放结束：{event.data.get('source')}")
+
+        def on_progress(event: PlaybackEvent):
+            """进度更新：同步到应用状态"""
+            with _STORAGE_LOCK:
+                self.app_state.current_position = event.data.get("position", 0)
+
+        def on_error(event: PlaybackEvent):
+            """播放错误：记录日志+更新状态"""
+            with _STORAGE_LOCK:
+                self.app_state.player_state = "error"
+                logger.error(f"[事件] 播放错误：{event.data.get('error')}")
+
+        # 注册播放器事件
+        audio_player.register_event_callback(PlaybackEvent.EVENT_PLAY, on_play)
+        audio_player.register_event_callback(PlaybackEvent.EVENT_PAUSE, on_pause)
+        audio_player.register_event_callback(PlaybackEvent.EVENT_RESUME, on_resume)
+        audio_player.register_event_callback(PlaybackEvent.EVENT_STOP, on_stop)
+        audio_player.register_event_callback(PlaybackEvent.EVENT_END, on_end)
+        audio_player.register_event_callback(PlaybackEvent.EVENT_PROGRESS, on_progress)
+        audio_player.register_event_callback(PlaybackEvent.EVENT_ERROR, on_error)
+
+    # ========== 新增：播放器相关命令实现 ==========
+    def _player_play(self, source: str = None, position: float = 0.0):
+        """播放音频（同步MySQL）"""
+        with _STORAGE_LOCK:
+            success = audio_player.play(source, position)
+            if success and source:
+                # 确保歌曲存在于MySQL
+                music_data = {
+                    "id": generate_id("m") if not source.startswith("http") else hash(source),
+                    "name": source.split("/")[-1],
+                    "artist": "未知",
+                    "url": source
+                }
+                self.mysql_storage.save_music(music_data)
+                # 添加到默认播放列表
+                self._add_to_playlist(music_data)
+            return success
+
+    def _player_pause(self):
+        """暂停播放"""
+        return audio_player.pause()
+
+    def _player_resume(self):
+        """恢复播放"""
+        return audio_player.resume()
+
+    def _player_stop(self):
+        """停止播放"""
+        return audio_player.stop()
+
+    def _player_next(self):
+        """下一曲（同步MySQL播放历史）"""
+        success = audio_player.play_next()
+        if success:
+            current_source = audio_player.get_current_source()
+            if current_source:
+                music_id = hash(current_source)
+                self._save_play_history(music_id)
         return success
+
+    def _player_prev(self):
+        """上一曲（同步MySQL播放历史）"""
+        success = audio_player.play_prev()
+        if success:
+            current_source = audio_player.get_current_source()
+            if current_source:
+                music_id = hash(current_source)
+                self._save_play_history(music_id)
+        return success
+
+    def _player_set_volume(self, volume: int):
+        """设置音量（持久化到MySQL）"""
+        success = audio_player.set_volume(volume)
+        if success:
+            self.app_state.volume = volume
+            # 保存音量配置到MySQL
+            self.mysql_storage.save_config("player.volume", str(volume))
+        return success
+
+    def _player_seek(self, position: float):
+        """调整播放进度"""
+        return audio_player.seek(position)
+
+    def _player_set_mode(self, mode: str):
+        """设置播放模式（持久化到MySQL）"""
+        # 映射播放模式到RepeatMode
+        mode_mapping = {
+            "sequence": RepeatMode.Queue,
+            "loop": RepeatMode.Loop,
+            "random": RepeatMode.Shuffle
+        }
+        success = audio_player.set_play_mode(mode)
+        if success:
+            self.app_state.repeat_mode = mode_mapping.get(mode, RepeatMode.Queue)
+            # 保存播放模式到MySQL
+            self.mysql_storage.save_config("player.repeat_mode", mode)
+        return success
+
+    def _player_add_queue(self, items: list):
+        """添加到播放队列（同步MySQL）"""
+        # 确保所有歌曲都保存到MySQL
+        for item in items:
+            if "id" not in item:
+                item["id"] = generate_id("m")
+            self.mysql_storage.save_music(item)
+        audio_player.add_to_queue(items)
+        return True
+
+
     def _init_plugin_commands(self):
         """注册插件相关命令"""
         self._commands.update({
@@ -211,6 +344,19 @@ class MessageBus:
             "SearchMusic": self._search_music,
             "GetAppState": self._get_app_state,
             "RefreshCache": self._refresh_cache
+        })
+
+        self._commands.update({
+            "PlayerPlay": self._player_play,
+            "PlayerPause": self._player_pause,
+            "PlayerResume": self._player_resume,
+            "PlayerStop": self._player_stop,
+            "PlayerNext": self._player_next,
+            "PlayerPrev": self._player_prev,
+            "PlayerSetVolume": self._player_set_volume,
+            "PlayerSeek": self._player_seek,
+            "PlayerSetMode": self._player_set_mode,
+            "PlayerAddQueue": self._player_add_queue
         })
 
     # ========== 命令具体实现 ==========

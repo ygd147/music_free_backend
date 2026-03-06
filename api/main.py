@@ -9,7 +9,7 @@ from typing import Optional, Any
 from core.plugin_manager import plugin_manager
 from core.local_music_manager import local_music_manager, LocalDirectory
 from pydantic import BaseModel, Field
-
+from .player_api import router as player_router
 # 导入核心模块
 from core.constants import logger, app_config, HTTP_SERVER_HOST, HTTP_SERVER_DEFAULT_PORT
 from core.command_handler import cmd_handler
@@ -219,7 +219,7 @@ async def scan_directory(dir_id: str):
 
 app.include_router(router)
 app.include_router(local_router)
-
+app.include_router(player_router)
 # ========== 服务启动逻辑 ==========
 def start_server_with_retry(initial_port: int = HTTP_SERVER_DEFAULT_PORT):
     """启动HTTP服务，端口占用时自动重试"""

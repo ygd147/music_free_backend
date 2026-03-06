@@ -127,7 +127,7 @@ class AudioPlayerManager:
             
             # 播放当前队列歌曲
             current_item = self._play_queue[self._current_queue_index]
-            return self._player.play(current_item["source"], start_position)
+            return self._player.play(current_item["url"], start_position)
 
     def play_next(self) -> bool:
         """播放下一曲"""
