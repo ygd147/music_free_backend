@@ -1,13 +1,14 @@
-"""MySQL存储实现：基于SQLAlchemy的ORM操作（修复 Not an executable object 错误）"""
+"""MySQL存储实现：基于SQLAlchemy的ORM操作（修复日期默认值和自增ID）"""
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any
 from sqlalchemy import (
     create_engine, Column, String, Integer, Text, DateTime, 
-    ForeignKey, Table, MetaData, select, update, delete, Index, text
+    ForeignKey, Table, MetaData, select, update, delete, Index, text, func
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, scoped_session
 from sqlalchemy.exc import OperationalError, ProgrammingError
+from sqlalchemy.dialects.mysql import BIGINT
 
 # 假设 BaseStorage 和模型转换函数已正确定义
 from .base import BaseStorage
@@ -23,8 +24,13 @@ metadata = MetaData()
 
 # ========== 数据库表模型（适配MySQL） ==========
 class DB_Music(Base):
-    """歌曲表"""
+    """歌曲表 - 新增自增ID但不作为主键"""
     __tablename__ = "music"
+    
+    # 新增自增ID列，但不作为主键
+    auto_id = Column(Integer, autoincrement=True, index=True, unique=True, comment="自增ID（非主键）")
+    
+    # 原有主键保持不变
     id = Column(String(32), primary_key=True, comment="歌曲ID")
     name = Column(String(255), nullable=False, comment="歌曲名称")
     artist = Column(String(255), nullable=False, comment="歌手")
@@ -34,14 +40,32 @@ class DB_Music(Base):
     lyric = Column(Text, default="", comment="歌词")
     cover = Column(Text, default="", comment="封面")
     source = Column(String(32), default="", comment="来源平台")
-    create_time = Column(DateTime, default=datetime.now, comment="创建时间")
-    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment="更新时间")
+    
+    # 修复：使用数据库级别的默认值
+    create_time = Column(
+        DateTime, 
+        nullable=False,
+        server_default=func.now(),  # 使用数据库函数设置默认值
+        comment="创建时间"
+    )
+    update_time = Column(
+        DateTime, 
+        nullable=False,
+        server_default=func.now(),  # 使用数据库函数设置默认值
+        onupdate=func.now(),  # 更新时自动设置为当前时间
+        comment="更新时间"
+    )
     
     # 新增MySQL索引
     __table_args__ = (
         Index('idx_music_name', 'name'),
         Index('idx_music_artist', 'artist'),
-        {'mysql_charset': 'utf8mb4', 'mysql_collate': 'utf8mb4_unicode_ci'}
+        Index('idx_auto_id', 'auto_id'),  # 为自增ID添加索引
+        {
+            'mysql_charset': 'utf8mb4',
+            'mysql_collate': 'utf8mb4_unicode_ci',
+            'mysql_engine': 'InnoDB'
+        }
     )
 
 class DB_Playlist(Base):
@@ -49,13 +73,63 @@ class DB_Playlist(Base):
     __tablename__ = "playlist"
     id = Column(String(32), primary_key=True, comment="播放列表ID")
     name = Column(String(255), default="默认播放列表", comment="列表名称")
-    create_time = Column(DateTime, default=datetime.now, comment="创建时间")
-    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment="更新时间")
+    
+    # 修复：使用数据库级别的默认值
+    create_time = Column(
+        DateTime, 
+        nullable=False,
+        server_default=func.now(),
+        comment="创建时间"
+    )
+    update_time = Column(
+        DateTime, 
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+        comment="更新时间"
+    )
+    
     # 关联歌曲（多对多）
     musics = relationship("DB_Music", secondary="playlist_music")
     
     __table_args__ = (
-        {'mysql_charset': 'utf8mb4', 'mysql_collate': 'utf8mb4_unicode_ci'}
+        {
+            'mysql_charset': 'utf8mb4',
+            'mysql_collate': 'utf8mb4_unicode_ci',
+            'mysql_engine': 'InnoDB'
+        }
+    )
+
+class DB_PlaylistQueue(Base):
+    """播放队列表"""
+    __tablename__ = "playlist_queue"
+    id = Column(String(32), primary_key=True, comment="队列项ID")
+    music_id = Column(String(32), nullable=False, comment="关联music表的id")
+    sort = Column(Integer, nullable=False, comment="队列排序（顺序）")
+    
+    # 修复：使用数据库级别的默认值
+    create_time = Column(
+        DateTime, 
+        nullable=False,
+        server_default=func.now(),
+        comment="创建时间"
+    )
+    update_time = Column(
+        DateTime, 
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+        comment="更新时间"
+    )
+    
+    __table_args__ = (
+        Index('idx_music_id', 'music_id'),
+        Index('idx_sort', 'sort'),
+        {
+            'mysql_charset': 'utf8mb4',
+            'mysql_collate': 'utf8mb4_unicode_ci',
+            'mysql_engine': 'InnoDB'
+        }
     )
 
 # 播放列表-歌曲关联表（多对多）
@@ -66,7 +140,8 @@ playlist_music = Table(
     Column("music_id", String(32), ForeignKey("music.id"), primary_key=True, comment="歌曲ID"),
     Column("sort", Integer, default=0, comment="排序号"),
     mysql_charset='utf8mb4',
-    mysql_collate='utf8mb4_unicode_ci'
+    mysql_collate='utf8mb4_unicode_ci',
+    mysql_engine='InnoDB'
 )
 
 class DB_MusicSheet(Base):
@@ -76,25 +151,51 @@ class DB_MusicSheet(Base):
     name = Column(String(255), nullable=False, comment="歌单名称")
     description = Column(Text, default="", comment="歌单描述")
     cover = Column(Text, default="", comment="歌单封面")
-    create_time = Column(DateTime, default=datetime.now, comment="创建时间")
-    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment="更新时间")
+    
+    # 修复：使用数据库级别的默认值
+    create_time = Column(
+        DateTime, 
+        nullable=False,
+        server_default=func.now(),
+        comment="创建时间"
+    )
+    update_time = Column(
+        DateTime, 
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+        comment="更新时间"
+    )
+    
     # 关联歌曲（多对多）
     musics = relationship("DB_Music", secondary="sheet_music")
     
     __table_args__ = (
         Index('idx_sheet_name', 'name'),
-        {'mysql_charset': 'utf8mb4', 'mysql_collate': 'utf8mb4_unicode_ci'}
+        {
+            'mysql_charset': 'utf8mb4',
+            'mysql_collate': 'utf8mb4_unicode_ci',
+            'mysql_engine': 'InnoDB'
+        }
     )
 
-# 歌单-歌曲关联表（多对多）
+# 歌单-歌曲关联表（多对多） - 修复表定义错误
 sheet_music = Table(
     "sheet_music", 
     Base.metadata,
     Column("sheet_id", String(32), ForeignKey("music_sheet.id"), primary_key=True, comment="歌单ID"),
     Column("music_id", String(32), ForeignKey("music.id"), primary_key=True, comment="歌曲ID"),
     Column("sort", Integer, default=0, comment="排序号"),
+    Column(
+        "create_time", 
+        DateTime, 
+        nullable=False,
+        server_default=func.now(),
+        comment="创建时间"
+    ),
     mysql_charset='utf8mb4',
-    mysql_collate='utf8mb4_unicode_ci'
+    mysql_collate='utf8mb4_unicode_ci',
+    mysql_engine='InnoDB'
 )
 
 class DB_PlayHistory(Base):
@@ -102,13 +203,24 @@ class DB_PlayHistory(Base):
     __tablename__ = "play_history"
     id = Column(String(32), primary_key=True, comment="历史ID")
     music_id = Column(String(32), ForeignKey("music.id"), nullable=False, comment="歌曲ID")
-    play_time = Column(DateTime, default=datetime.now, comment="播放时间")
+    
+    # 修复：使用数据库级别的默认值
+    play_time = Column(
+        DateTime, 
+        nullable=False,
+        server_default=func.now(),
+        comment="播放时间"
+    )
     play_duration = Column(Integer, default=0, comment="播放时长（秒）")
     
     __table_args__ = (
         Index('idx_play_history_time', 'play_time'),
         Index('idx_play_history_music', 'music_id'),
-        {'mysql_charset': 'utf8mb4', 'mysql_collate': 'utf8mb4_unicode_ci'}
+        {
+            'mysql_charset': 'utf8mb4',
+            'mysql_collate': 'utf8mb4_unicode_ci',
+            'mysql_engine': 'InnoDB'
+        }
     )
 
 class DB_SearchHistory(Base):
@@ -116,17 +228,28 @@ class DB_SearchHistory(Base):
     __tablename__ = "search_history"
     id = Column(String(32), primary_key=True, comment="搜索ID")
     keyword = Column(String(255), nullable=False, comment="搜索关键词")
-    search_time = Column(DateTime, default=datetime.now, comment="搜索时间")
+    
+    # 修复：使用数据库级别的默认值
+    search_time = Column(
+        DateTime, 
+        nullable=False,
+        server_default=func.now(),
+        comment="搜索时间"
+    )
     
     __table_args__ = (
         Index('idx_search_history_keyword', 'keyword'),
         Index('idx_search_history_time', 'search_time'),
-        {'mysql_charset': 'utf8mb4', 'mysql_collate': 'utf8mb4_unicode_ci'}
+        {
+            'mysql_charset': 'utf8mb4',
+            'mysql_collate': 'utf8mb4_unicode_ci',
+            'mysql_engine': 'InnoDB'
+        }
     )
 
-# ========== MySQL存储实现（修复版） ==========
+# ========== MySQL存储实现 ==========
 class MySQLStorage(BaseStorage):
-    """MySQL存储实现（修复 Not an executable object 错误）"""
+    """MySQL存储实现"""
     def __init__(self):
         # 初始化日志
         self.logger = logger
@@ -134,27 +257,27 @@ class MySQLStorage(BaseStorage):
         self._init_storage()
 
     def _init_storage(self):
-        """初始化MySQL数据库（修复连接和建库逻辑）"""
+        """初始化MySQL数据库"""
         try:
-            # 1. 先创建数据库（如果不存在）- 修复执行方式
+            # 1. 先创建数据库（如果不存在）
             self._create_database_if_not_exists()
             
-            # 2. 创建引擎（支持连接池，修复参数）
+            # 2. 创建引擎（支持连接池）
             conn_url = f"mysql+pymysql://{mysql_config.user}:{mysql_config.password}@{mysql_config.host}:{mysql_config.port}/{mysql_config.database}?charset={mysql_config.charset}"
             self.engine = create_engine(
                 conn_url,
-                pool_size=10,          # 连接池大小
-                max_overflow=20,       # 最大溢出连接数
-                pool_recycle=3600,     # 连接回收时间（秒）
-                echo=False,            # 生产环境关闭SQL日志
-                pool_pre_ping=True,    # 连接前检查是否有效
-                future=True            # 启用SQLAlchemy 2.0兼容模式（关键修复）
+                pool_size=10,
+                max_overflow=20,
+                pool_recycle=3600,
+                echo=False,
+                pool_pre_ping=True,
+                future=True
             )
             
-            # 3. 创建所有表（确保元数据绑定）
+            # 3. 创建所有表
             Base.metadata.create_all(bind=self.engine)
             
-            # 4. 创建线程安全的会话（修复session配置）
+            # 4. 创建线程安全的会话
             self.SessionFactory = sessionmaker(
                 bind=self.engine,
                 autocommit=False,
@@ -174,16 +297,14 @@ class MySQLStorage(BaseStorage):
             raise RuntimeError(f"MySQL存储初始化失败：{str(e)}")
 
     def _create_database_if_not_exists(self):
-        """创建数据库（修复 Not an executable object 错误）"""
+        """创建数据库"""
         try:
             # 先连接MySQL服务器（不指定数据库）
             temp_conn_url = f"mysql+pymysql://{mysql_config.user}:{mysql_config.password}@{mysql_config.host}:{mysql_config.port}/?charset={mysql_config.charset}"
             temp_engine = create_engine(temp_conn_url, pool_pre_ping=True, future=True)
             
             with temp_engine.connect() as conn:
-                # 关闭自动提交
-                conn.execution_options(isolation_level="AUTOCOMMIT")
-                # 修复：使用text()包装SQL语句，避免执行对象错误
+                # 创建数据库
                 create_db_sql = text(f"""
                     CREATE DATABASE IF NOT EXISTS {mysql_config.database} 
                     CHARACTER SET {mysql_config.charset} 
@@ -203,7 +324,10 @@ class MySQLStorage(BaseStorage):
         try:
             default_playlist = session.query(DB_Playlist).filter_by(id="default").first()
             if not default_playlist:
-                default_playlist = DB_Playlist(id="default", name="默认播放列表")
+                default_playlist = DB_Playlist(
+                    id="default", 
+                    name="默认播放列表"
+                )
                 session.add(default_playlist)
                 session.commit()
                 self.logger.info("创建默认播放列表")
@@ -213,37 +337,44 @@ class MySQLStorage(BaseStorage):
         finally:
             session.close()
 
-    # ========== 核心工具方法（新增） ==========
     def _get_session(self):
-        """获取session并确保正确的上下文"""
+        """获取session"""
         return self.Session()
 
-    # ========== 歌曲相关实现（修复删除逻辑） ==========
+    # ========== 歌曲相关实现 ==========
     def save_music(self, music: Dict[str, Any]) -> str:
         """保存歌曲"""
         session = self._get_session()
         now = datetime.now()
-        if "create_time" not in music or not music["create_time"]:
+        
+        # 如果传入的字典中有时间字段，但值为None，则设置默认值
+        if "create_time" not in music or not music.get("create_time"):
             music["create_time"] = now
-        if "update_time" not in music or not music["update_time"]:
+        if "update_time" not in music or not music.get("update_time"):
             music["update_time"] = now
+            
         try:
             # 验证数据
             music_model = dict_to_model(music, MusicModel)
+            
             # 检查是否已存在
             existing = session.query(DB_Music).filter_by(id=music_model.id).first()
             
             if existing:
                 # 更新现有歌曲
                 for key, value in model_to_dict(music_model).items():
-                    if key not in ["id", "create_time"]:  # 不更新ID和创建时间
+                    if key not in ["id", "auto_id", "create_time"]:  # 不更新ID、自增ID和创建时间
                         setattr(existing, key, value)
+                existing.update_time = now
                 session.commit()
                 self.logger.info(f"更新歌曲：{music_model.id} - {music_model.name}")
                 return music_model.id
             else:
                 # 新增歌曲
-                db_music = DB_Music(**model_to_dict(music_model))
+                music_data = model_to_dict(music_model)
+                # 移除auto_id，让数据库自增生成
+                music_data.pop("auto_id", None)
+                db_music = DB_Music(**music_data)
                 session.add(db_music)
                 session.commit()
                 self.logger.info(f"保存歌曲：{music_model.id} - {music_model.name}")
@@ -264,6 +395,7 @@ class MySQLStorage(BaseStorage):
                 return None
                 
             return {
+                "auto_id": music.auto_id,  # 新增的auto_id字段
                 "id": music.id,
                 "name": music.name,
                 "artist": music.artist,
@@ -273,20 +405,44 @@ class MySQLStorage(BaseStorage):
                 "lyric": music.lyric,
                 "cover": music.cover,
                 "source": music.source,
-                "create_time": music.create_time.strftime("%Y-%m-%d %H:%M:%S"),
-                "update_time": music.update_time.strftime("%Y-%m-%d %H:%M:%S")
+                "create_time": music.create_time.strftime("%Y-%m-%d %H:%M:%S") if music.create_time else None,
+                "update_time": music.update_time.strftime("%Y-%m-%d %H:%M:%S") if music.update_time else None
+            }
+        finally:
+            session.close()
+
+    def get_music_by_auto_id(self, auto_id: int) -> Optional[Dict[str, Any]]:
+        """根据自增ID获取歌曲（新增方法）"""
+        session = self._get_session()
+        try:
+            music = session.query(DB_Music).filter_by(auto_id=auto_id).first()
+            if not music:
+                return None
+                
+            return {
+                "auto_id": music.auto_id,
+                "id": music.id,
+                "name": music.name,
+                "artist": music.artist,
+                "album": music.album,
+                "duration": music.duration,
+                "url": music.url,
+                "lyric": music.lyric,
+                "cover": music.cover,
+                "source": music.source,
+                "create_time": music.create_time.strftime("%Y-%m-%d %H:%M:%S") if music.create_time else None,
+                "update_time": music.update_time.strftime("%Y-%m-%d %H:%M:%S") if music.update_time else None
             }
         finally:
             session.close()
 
     def delete_music(self, music_id: str) -> bool:
-        """删除歌曲（修复 Not an executable object 错误）"""
+        """删除歌曲"""
         session = self._get_session()
         try:
             # 开始事务
             session.begin()
             
-            # 修复：使用表对象的delete()方法，而非全局delete函数
             # 1. 删除播放列表关联
             del_playlist_music = playlist_music.delete().where(playlist_music.c.music_id == music_id)
             session.execute(del_playlist_music)
@@ -316,17 +472,20 @@ class MySQLStorage(BaseStorage):
             session.close()
 
     def search_music(self, keyword: str) -> List[Dict[str, Any]]:
-        """搜索歌曲（优化MySQL模糊查询）"""
+        """搜索歌曲"""
         session = self._get_session()
         try:
-            # 使用CONCAT优化模糊查询
+            # 使用OR条件进行模糊查询
             query = session.query(DB_Music).filter(
-                DB_Music.name.like(f"%{keyword}%") | DB_Music.artist.like(f"%{keyword}%")
+                DB_Music.name.like(f"%{keyword}%") | 
+                DB_Music.artist.like(f"%{keyword}%") |
+                DB_Music.album.like(f"%{keyword}%")
             ).limit(50).all()
             
             result = []
             for music in query:
                 result.append({
+                    "auto_id": music.auto_id,  # 新增的auto_id字段
                     "id": music.id,
                     "name": music.name,
                     "artist": music.artist,
@@ -338,7 +497,7 @@ class MySQLStorage(BaseStorage):
         finally:
             session.close()
 
-    # ========== 播放列表相关实现（修复删除逻辑） ==========
+    # ========== 播放列表相关实现 ==========
     def save_playlist(self, playlist: Dict[str, Any]) -> str:
         """保存播放列表"""
         session = self._get_session()
@@ -379,7 +538,6 @@ class MySQLStorage(BaseStorage):
             
             # 获取关联的歌曲（带排序）
             music_list = []
-            # 关联查询播放列表-歌曲表，按sort排序
             playlist_music_query = session.query(
                 DB_Music, playlist_music.c.sort
             ).join(
@@ -392,6 +550,7 @@ class MySQLStorage(BaseStorage):
             
             for music, sort in playlist_music_query:
                 music_list.append({
+                    "auto_id": music.auto_id,  # 新增的auto_id字段
                     "id": music.id,
                     "name": music.name,
                     "artist": music.artist,
@@ -405,14 +564,14 @@ class MySQLStorage(BaseStorage):
                 "name": playlist.name,
                 "music_ids": [m["id"] for m in music_list],
                 "musics": music_list,
-                "create_time": playlist.create_time.strftime("%Y-%m-%d %H:%M:%S"),
-                "update_time": playlist.update_time.strftime("%Y-%m-%d %H:%M:%S")
+                "create_time": playlist.create_time.strftime("%Y-%m-%d %H:%M:%S") if playlist.create_time else None,
+                "update_time": playlist.update_time.strftime("%Y-%m-%d %H:%M:%S") if playlist.update_time else None
             }
         finally:
             session.close()
 
     def add_music_to_playlist(self, playlist_id: str, music_id: str) -> bool:
-        """添加歌曲到播放列表（带排序）"""
+        """添加歌曲到播放列表"""
         session = self._get_session()
         try:
             playlist = session.query(DB_Playlist).filter_by(id=playlist_id).first()
@@ -438,7 +597,7 @@ class MySQLStorage(BaseStorage):
             
             new_sort = (max_sort[0] + 1) if max_sort else 0
             
-            # 添加关联记录（修复执行方式）
+            # 添加关联记录
             insert_stmt = playlist_music.insert().values(
                 playlist_id=playlist_id,
                 music_id=music_id,
@@ -458,7 +617,7 @@ class MySQLStorage(BaseStorage):
             session.close()
 
     def remove_music_from_playlist(self, playlist_id: str, music_id: str) -> bool:
-        """从播放列表移除歌曲（修复删除逻辑）"""
+        """从播放列表移除歌曲"""
         session = self._get_session()
         try:
             # 检查关联是否存在
@@ -470,7 +629,7 @@ class MySQLStorage(BaseStorage):
             if not existing:
                 return True
             
-            # 修复：使用表对象的delete()方法
+            # 删除关联记录
             del_stmt = playlist_music.delete().where(
                 playlist_music.c.playlist_id == playlist_id,
                 playlist_music.c.music_id == music_id
@@ -488,7 +647,7 @@ class MySQLStorage(BaseStorage):
         finally:
             session.close()
 
-    # ========== 歌单相关实现（新增删除歌单方法，修复同步逻辑） ==========
+    # ========== 歌单相关实现 ==========
     def save_music_sheet(self, sheet: Dict[str, Any]) -> str:
         """保存歌单"""
         session = self._get_session()
@@ -529,9 +688,9 @@ class MySQLStorage(BaseStorage):
             session.close()
 
     def _sync_sheet_musics(self, session, sheet_id: str, music_ids: List[str]):
-        """同步歌单歌曲（带排序，修复删除逻辑）"""
+        """同步歌单歌曲"""
         try:
-            # 先删除现有关联（修复执行方式）
+            # 先删除现有关联
             del_stmt = sheet_music.delete().where(sheet_music.c.sheet_id == sheet_id)
             session.execute(del_stmt)
             
@@ -554,7 +713,7 @@ class MySQLStorage(BaseStorage):
             raise
 
     def delete_music_sheet(self, sheet_id: str) -> bool:
-        """删除歌单（新增，修复 Not an executable object 错误）"""
+        """删除歌单"""
         session = self._get_session()
         try:
             # 检查歌单是否存在
@@ -566,11 +725,11 @@ class MySQLStorage(BaseStorage):
             # 开始事务
             session.begin()
             
-            # 1. 删除歌单-歌曲关联（修复执行方式）
+            # 1. 删除歌单-歌曲关联
             del_sheet_music = sheet_music.delete().where(sheet_music.c.sheet_id == sheet_id)
             session.execute(del_sheet_music)
             
-            # 2. 删除歌单主表（修复执行方式）
+            # 2. 删除歌单主表
             del_sheet = DB_MusicSheet.__table__.delete().where(DB_MusicSheet.id == sheet_id)
             result = session.execute(del_sheet)
             
@@ -606,7 +765,7 @@ class MySQLStorage(BaseStorage):
                     "description": sheet.description,
                     "cover": sheet.cover,
                     "music_count": music_count,
-                    "create_time": sheet.create_time.strftime("%Y-%m-%d %H:%M:%S")
+                    "create_time": sheet.create_time.strftime("%Y-%m-%d %H:%M:%S") if sheet.create_time else None
                 })
             
             # 按创建时间倒序
@@ -637,6 +796,7 @@ class MySQLStorage(BaseStorage):
             
             for music, sort in sheet_music_query:
                 music_list.append({
+                    "auto_id": music.auto_id,  # 新增的auto_id字段
                     "id": music.id,
                     "name": music.name,
                     "artist": music.artist,
@@ -652,8 +812,8 @@ class MySQLStorage(BaseStorage):
                 "cover": sheet.cover,
                 "music_ids": [m["id"] for m in music_list],
                 "musics": music_list,
-                "create_time": sheet.create_time.strftime("%Y-%m-%d %H:%M:%S"),
-                "update_time": sheet.update_time.strftime("%Y-%m-%d %H:%M:%S")
+                "create_time": sheet.create_time.strftime("%Y-%m-%d %H:%M:%S") if sheet.create_time else None,
+                "update_time": sheet.update_time.strftime("%Y-%m-%d %H:%M:%S") if sheet.update_time else None
             }
         finally:
             session.close()
@@ -677,7 +837,7 @@ class MySQLStorage(BaseStorage):
             session.add(db_history)
             session.commit()
             
-            # 清理7天前的历史（可选）
+            # 清理7天前的历史
             seven_days_ago = datetime.now() - timedelta(days=7)
             clean_stmt = DB_PlayHistory.__table__.delete().where(DB_PlayHistory.play_time < seven_days_ago)
             session.execute(clean_stmt)
@@ -708,7 +868,7 @@ class MySQLStorage(BaseStorage):
                     result.append({
                         "id": history.id,
                         "music": music,
-                        "play_time": history.play_time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "play_time": history.play_time.strftime("%Y-%m-%d %H:%M:%S") if history.play_time else None,
                         "play_duration": history.play_duration
                     })
             
@@ -768,14 +928,13 @@ class MySQLStorage(BaseStorage):
                 {
                     "id": h.id,
                     "keyword": h.keyword,
-                    "search_time": h.search_time.strftime("%Y-%m-%d %H:%M:%S")
+                    "search_time": h.search_time.strftime("%Y-%m-%d %H:%M:%S") if h.search_time else None
                 }
                 for h in histories
             ]
         finally:
             session.close()
 
-    # ========== 新增：清空历史方法 ==========
     def clear_play_history(self) -> bool:
         """清空播放历史"""
         session = self._get_session()
@@ -805,5 +964,93 @@ class MySQLStorage(BaseStorage):
             session.rollback()
             self.logger.error(f"清空搜索历史失败：{e}", exc_info=True)
             return False
+        finally:
+            session.close()
+
+            # ========== 新增：播放队列（playlist_queue）相关方法 ==========
+    def add_to_playlist_queue(self, queue_item: Dict[str, Any]) -> str:
+        """添加歌曲到播放队列"""
+        session = self._get_session()
+        try:
+            # 验证核心字段
+            if not queue_item.get("music_id"):
+                raise ValueError("播放队列项必须包含music_id字段")
+            
+            # 生成队列项ID（未提供时自动生成）
+            queue_id = queue_item.get("id") or str(uuid.uuid4())[:32]
+            
+            # 处理排序号（未提供时取当前最大排序+1）
+            if "sort" not in queue_item:
+                max_sort = session.query(DB_PlaylistQueue.sort).order_by(DB_PlaylistQueue.sort.desc()).first()
+                queue_sort = (max_sort[0] + 1) if max_sort else 0
+            else:
+                queue_sort = queue_item["sort"]
+            
+            # 检查队列项是否已存在
+            existing = session.query(DB_PlaylistQueue).filter_by(id=queue_id).first()
+            
+            if existing:
+                # 更新现有队列项
+                existing.music_id = queue_item["music_id"]
+                existing.sort = queue_sort
+                session.commit()
+                self.logger.info(f"更新播放队列项：{queue_id}（关联歌曲：{queue_item['music_id']}）")
+                return queue_id
+            else:
+                # 新增队列项
+                db_queue_item = DB_PlaylistQueue(
+                    id=queue_id,
+                    music_id=queue_item["music_id"],
+                    sort=queue_sort
+                )
+                session.add(db_queue_item)
+                session.commit()
+                self.logger.info(f"添加播放队列项：{queue_id}（关联歌曲：{queue_item['music_id']}）")
+                return queue_id
+        except Exception as e:
+            session.rollback()
+            self.logger.error(f"添加播放队列项失败：{e}", exc_info=True)
+            raise
+        finally:
+            session.close()
+
+    def clear_playlist_queue(self) -> bool:
+        """清空播放队列"""
+        session = self._get_session()
+        try:
+            # 删除所有队列项
+            del_stmt = DB_PlaylistQueue.__table__.delete()
+            session.execute(del_stmt)
+            session.commit()
+            
+            self.logger.info("播放队列已清空")
+            return True
+        except Exception as e:
+            session.rollback()
+            self.logger.error(f"清空播放队列失败：{e}", exc_info=True)
+            return False
+        finally:
+            session.close()
+
+    def get_playlist_queue(self) -> List[Dict[str, Any]]:
+        """获取完整播放队列（按sort升序）"""
+        session = self._get_session()
+        try:
+            # 按排序号查询所有队列项
+            queue_items = session.query(DB_PlaylistQueue).order_by(DB_PlaylistQueue.sort.asc()).all()
+            result = []
+            
+            for item in queue_items:
+                # 获取关联的歌曲详情
+                music = self.get_music_by_id(item.music_id)
+                result.append({
+                    "id": item.id,
+                    "music_id": item.music_id,
+                    "music": music,  # 关联的完整歌曲信息
+                    "sort": item.sort,
+                    "create_time": item.create_time.strftime("%Y-%m-%d %H:%M:%S") if item.create_time else None,
+                    "update_time": item.update_time.strftime("%Y-%m-%d %H:%M:%S") if item.update_time else None
+                })
+            return result
         finally:
             session.close()

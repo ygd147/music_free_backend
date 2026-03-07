@@ -5,6 +5,7 @@ from typing import Optional, Dict, Any, Callable, List
 from core.constants import logger
 from .base import PlaybackState, PlaybackEvent
 from .pygame_player import PygameAudioPlayer
+from ..storage.mysql_storage import MySQLStorage  
 
 # ========== 全局播放器管理器 ==========
 class AudioPlayerManager:
@@ -50,8 +51,55 @@ class AudioPlayerManager:
         
         # 线程安全锁
         self._queue_lock = threading.RLock()
-        
+        # 新增：初始化存储实例
+        self._storage = MySQLStorage()
+        # 新增：初始化存储实例
+        self._load_queue_from_db()
         logger.info("音频播放器管理器初始化完成")
+
+    def _load_queue_from_db(self):
+        """从playlist_queue表加载播放队列"""
+        with self._queue_lock:
+            try:
+                # 从数据库获取队列（按sort排序）
+                db_queue = self._storage.get_playlist_queue()
+                # 转换为本地队列格式
+                self._play_queue = [
+                    {
+                        "id": item["id"],
+                        "source": item["music"]["url"],  # 适配原有source字段
+                        "title": item["music"]["name"],
+                        "artist": item["music"]["artist"],
+                        "music_id": item["music_id"],
+                        "sort": item["sort"]
+                    }
+                    for item in db_queue if item["music"]  # 过滤无效歌曲
+                ]
+                # 恢复上次播放位置（可选）
+                if self._play_queue:
+                    self._current_queue_index = 0
+                logger.info(f"从数据库加载播放队列，共{len(self._play_queue)}首歌曲")
+            except Exception as e:
+                logger.error(f"加载播放队列失败：{e}", exc_info=True)
+
+    # 新增：保存播放队列到数据库
+    def _save_queue_to_db(self):
+        """将播放队列持久化到playlist_queue表"""
+        with self._queue_lock:
+            try:
+                # 先清空数据库队列
+                self._storage.clear_playlist_queue()
+                # 批量添加队列项
+                for idx, item in enumerate(self._play_queue):
+                    queue_item = {
+                        "id": item.get("id"),  # 保留原有ID
+                        "music_id": item.get("music_id"),
+                        "sort": idx  # 重新排序
+                    }
+                    self._storage.add_to_playlist_queue(queue_item)
+                logger.info(f"播放队列已持久化到数据库，共{len(self._play_queue)}首歌曲")
+            except Exception as e:
+                logger.error(f"保存播放队列失败：{e}", exc_info=True)
 
     def _register_player_events(self):
         """注册播放器事件"""
@@ -82,6 +130,7 @@ class AudioPlayerManager:
         :param items: 歌曲列表，每个元素包含source、title、artist等信息
         """
         with self._queue_lock:
+            self._save_queue_to_db()
             self._play_queue.extend(items)
             logger.info(f"已添加{len(items)}首歌曲到播放队列，队列总数：{len(self._play_queue)}")
 
@@ -90,6 +139,7 @@ class AudioPlayerManager:
         with self._queue_lock:
             self._play_queue.clear()
             self._current_queue_index = -1
+            self._save_queue_to_db()
             logger.info("播放队列已清空")
 
     def get_queue(self) -> List[Dict[str, Any]]:
@@ -97,7 +147,7 @@ class AudioPlayerManager:
         with self._queue_lock:
             return self._play_queue.copy()
 
-    # ========== 播放控制 ==========
+     # ========== 播放控制 ==========
     def play(self, source: Optional[str] = None, start_position: float = 0.0) -> bool:
         """
         播放音频（支持指定源或播放队列中的歌曲）
@@ -114,7 +164,11 @@ class AudioPlayerManager:
                         self._current_queue_index = idx
                         break
                 
-                return self._player.play(source, start_position)
+                result = self._player.play(source, start_position)
+                # 新增：播放时同步队列状态（可选）
+                if result:
+                    self._save_queue_to_db()
+                return result
             
             # 没有指定source，播放队列中的歌曲
             if not self._play_queue:
@@ -127,7 +181,11 @@ class AudioPlayerManager:
             
             # 播放当前队列歌曲
             current_item = self._play_queue[self._current_queue_index]
-            return self._player.play(current_item["url"], start_position)
+            result = self._player.play(current_item["url"], start_position)
+            # 新增：播放后同步
+            if result:
+                self._save_queue_to_db()
+            return result
 
     def play_next(self) -> bool:
         """播放下一曲"""
@@ -146,7 +204,11 @@ class AudioPlayerManager:
             # 播放下一曲
             next_item = self._play_queue[self._current_queue_index]
             logger.info(f"播放下一曲：{next_item.get('title', '未知歌曲')}")
-            return self._player.play(next_item["source"])
+            result = self._player.play(next_item["source"])
+            # 新增：切换歌曲后持久化
+            if result:
+                self._save_queue_to_db()
+            return result
 
     def play_prev(self) -> bool:
         """播放上一曲"""
@@ -161,7 +223,11 @@ class AudioPlayerManager:
             # 播放上一曲
             prev_item = self._play_queue[self._current_queue_index]
             logger.info(f"播放上一曲：{prev_item.get('title', '未知歌曲')}")
-            return self._player.play(prev_item["source"])
+            result = self._player.play(prev_item["source"])
+            # 新增：切换歌曲后持久化
+            if result:
+                self._save_queue_to_db()
+            return result
 
     def pause(self) -> bool:
         """暂停播放"""
@@ -255,4 +321,10 @@ audio_player = AudioPlayerManager()
 
 # 程序退出时释放资源
 import atexit
-atexit.register(audio_player.release)
+# 修复：原代码最后缺少右括号，新增退出时保存队列
+def _exit_handler():
+    audio_player.release()
+    # 退出前最后保存一次队列
+    audio_player._save_queue_to_db()
+
+atexit.register(_exit_handler)  # 修复语法错误 + 新增队列保存
